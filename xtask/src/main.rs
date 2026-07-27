@@ -2194,6 +2194,13 @@ fn build_ffmpeg(layout: &WorkspaceLayout, options: DepsOptions) -> Result<()> {
         vec!["-fPIC".to_string()]
     };
     let mut extra_ldflags = Vec::new();
+    let gas_preprocessor_dir = if matches!(options.target, NativeTarget::Aarch64WindowsMsvc) {
+        ensure_gas_preprocessor(layout)?
+            .parent()
+            .map(Path::to_path_buf)
+    } else {
+        None
+    };
     if let Some(config) = apple_toolchain(options.target)? {
         configure.arg(format!("--cc={}", config.clang.display()));
         configure.arg(format!("--ar={}", config.ar.display()));
@@ -2296,10 +2303,11 @@ fn build_ffmpeg(layout: &WorkspaceLayout, options: DepsOptions) -> Result<()> {
         ));
         if matches!(options.target, NativeTarget::Aarch64WindowsMsvc) {
             configure.arg("--enable-cross-compile");
-            let gas_preprocessor = ensure_gas_preprocessor(layout)?;
-            if let Some(parent) = gas_preprocessor.parent() {
-                prepend_path_to_command(&mut configure, parent);
-            }
+            apply_ffmpeg_assembler_path(
+                &mut configure,
+                options.target,
+                gas_preprocessor_dir.as_deref(),
+            );
         }
         configure.arg("--toolchain=msvc");
         extra_cflags.push(format!(
@@ -2351,6 +2359,7 @@ fn build_ffmpeg(layout: &WorkspaceLayout, options: DepsOptions) -> Result<()> {
     let mut build =
         ffmpeg_make_command(&make, &layout.ffmpeg_build_dir, &build_args, options.target)?;
     apply_windows_target_env(&mut build, options.target)?;
+    apply_ffmpeg_assembler_path(&mut build, options.target, gas_preprocessor_dir.as_deref());
     apply_android_host_env(&mut build, options.target)?;
     apply_windows_posix_shell(&mut build, options.target);
     append_windows_posix_paths(&mut build);
@@ -2363,6 +2372,11 @@ fn build_ffmpeg(layout: &WorkspaceLayout, options: DepsOptions) -> Result<()> {
         options.target,
     )?;
     apply_windows_target_env(&mut install, options.target)?;
+    apply_ffmpeg_assembler_path(
+        &mut install,
+        options.target,
+        gas_preprocessor_dir.as_deref(),
+    );
     apply_android_host_env(&mut install, options.target)?;
     apply_windows_posix_shell(&mut install, options.target);
     append_windows_posix_paths(&mut install);
@@ -2445,6 +2459,14 @@ fn ensure_gas_preprocessor_executable(path: &Path) -> Result<()> {
         "chmod +x {}",
         shell_quote(&path_to_forward_slashes(path))
     )))
+}
+
+fn apply_ffmpeg_assembler_path(command: &mut Command, target: NativeTarget, dir: Option<&Path>) {
+    if matches!(target, NativeTarget::Aarch64WindowsMsvc) {
+        if let Some(dir) = dir {
+            prepend_path_to_command(command, dir);
+        }
+    }
 }
 
 fn enable_ffmpeg_archive_response_files(build_dir: &Path) -> Result<()> {
@@ -4227,6 +4249,24 @@ mod tests {
         assert!(dav1d_requires_nasm(NativeTarget::X86_64Android));
         assert!(!dav1d_requires_nasm(NativeTarget::Aarch64Macos));
         assert!(!dav1d_requires_nasm(NativeTarget::Aarch64Ios));
+    }
+
+    #[test]
+    fn windows_arm64_ffmpeg_commands_include_gas_preprocessor_path() {
+        let tools_dir = env::temp_dir().join("erika-xtask-gas-preprocessor-path-test");
+        let existing_dir = env::temp_dir().join("erika-xtask-existing-path-test");
+        let mut command = Command::new("tool");
+        command.env("PATH", env::join_paths([&existing_dir]).unwrap());
+
+        apply_ffmpeg_assembler_path(
+            &mut command,
+            NativeTarget::Aarch64WindowsMsvc,
+            Some(&tools_dir),
+        );
+
+        let merged = command_env_path(&command).unwrap();
+        let paths = env::split_paths(&merged).collect::<Vec<_>>();
+        assert_eq!(paths, [tools_dir, existing_dir]);
     }
 
     #[test]
