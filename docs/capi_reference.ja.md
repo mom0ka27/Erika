@@ -239,6 +239,8 @@ ErikaStatus erika_presenter_set_playback_rate(ErikaPresenterHandle *, double rat
 ErikaStatus erika_presenter_set_volume(ErikaPresenterHandle *, double volume);   // 0.0–1.0
 ErikaStatus erika_presenter_set_upscaler(ErikaPresenterHandle *, int32_t mode);  // ErikaLumaUpscalerMode
 ErikaStatus erika_presenter_set_subtitle_scale(ErikaPresenterHandle *, double scale);
+ErikaStatus erika_presenter_set_subtitle_font(ErikaPresenterHandle *, const char *family, const char *file_path);
+ErikaStatus erika_presenter_set_subtitle_style(ErikaPresenterHandle *, uint32_t primary_rgba, uint32_t outline_rgba, double font_size, double outline_width, bool force_override);
 ErikaStatus erika_presenter_set_output_headroom(ErikaPresenterHandle *, float headroom, bool known);
 ```
 
@@ -281,6 +283,15 @@ value に使えない文字を含む値も同様です。検証は最初の rang
 header が適用されるのは media source だけです。外部 subtitle track と danmaku sidecar は
 まだ header なしで取得されるため、video を認証する token はこれらの URL にはまだ適用
 されません。
+
+`set_subtitle_font` と `set_subtitle_style` は字幕の **fallback** の見た目を設定します。
+family や path が空ならその指定を解除します。色は `0xRRGGBBAA` で、既定は不透明な白の
+文字（`0xFFFFFFFF`）と半透明な黒の縁取り（`0x0000007F`）です。`font_size`（既定 `48`、
+`8..400` にクランプ）と `outline_width`（既定 `2`、`0..32` にクランプ）は ASS script 単位で、
+`set_subtitle_scale` がさらに掛かります。container の ASS script は自身の styling を保ち、
+これらは script が指定していない部分、system が解決できない font、そして plain-text
+（SRT/WebVTT）字幕の見た目を埋めるだけです。`force_override = true` を渡すと、自前の
+styling を持つ ASS dialogue にも font・サイズ・縁取り・色を適用します。
 
 `set_output_headroom` は display の current HDR/SDR ratio を publish します。Android API 34+
 host は `Display.registerHdrSdrRatioChangedListener` から呼び、valid ratio は `known = true`、
