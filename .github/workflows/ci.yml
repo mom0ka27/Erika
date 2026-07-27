@@ -92,16 +92,19 @@ jobs:
         if: matrix.arch == 'arm64'
         run: >-
           ERIKA_NATIVE_PROFILE="$PROFILE"
+          ERIKA_NATIVE_TARGET="${{ matrix.target }}"
           cargo test --locked -p erika --lib
       - name: Test C API library
         if: matrix.arch == 'arm64'
         run: >-
           ERIKA_NATIVE_PROFILE="$PROFILE"
+          ERIKA_NATIVE_TARGET="${{ matrix.target }}"
           cargo test --locked -p erika_capi --lib
       - name: Clippy core crate
         if: matrix.arch == 'arm64'
         run: >-
           ERIKA_NATIVE_PROFILE="$PROFILE"
+          ERIKA_NATIVE_TARGET="${{ matrix.target }}"
           cargo clippy --locked -p erika --all-targets --all-features
           --no-deps
 
