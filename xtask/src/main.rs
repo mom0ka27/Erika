@@ -3689,7 +3689,10 @@ fn android_sdk_cmake_tool(tool: &str) -> Option<PathBuf> {
 }
 
 fn posix_shell() -> Option<PathBuf> {
-    which("sh")
+    msys2_usr_bin()
+        .map(|dir| dir.join("sh.exe"))
+        .filter(|path| path.is_file())
+        .or_else(|| which("sh"))
         .or_else(|| {
             which("bash").filter(|path| {
                 !cfg!(windows)
@@ -3707,7 +3710,10 @@ fn posix_shell() -> Option<PathBuf> {
 }
 
 fn gnu_make() -> Option<PathBuf> {
-    which("make")
+    msys2_usr_bin()
+        .map(|dir| dir.join("make.exe"))
+        .filter(|path| path.is_file())
+        .or_else(|| which("make"))
         .or_else(|| which("gmake"))
         .or_else(|| which("mingw32-make"))
         .or_else(|| {
@@ -3717,6 +3723,14 @@ fn gnu_make() -> Option<PathBuf> {
                 .find(|path| path.is_file())
         })
         .or_else(android_ndk_make)
+}
+
+fn msys2_usr_bin() -> Option<PathBuf> {
+    env::var_os("MSYS2_ROOT")
+        .map(PathBuf::from)
+        .map(|root| root.join("usr/bin"))
+        .filter(|path| path.is_dir())
+        .or_else(|| existing_path("C:/msys64/usr/bin"))
 }
 
 fn windows_posix_bin_dirs() -> Vec<PathBuf> {
@@ -3824,8 +3838,26 @@ fn append_windows_posix_paths(command: &mut Command) {
     if !cfg!(windows) {
         return;
     }
+    if let Some(msys2_bin) = msys2_usr_bin() {
+        prepend_path_to_command(command, &msys2_bin);
+        return;
+    }
     let dirs = windows_posix_bin_dirs();
     append_paths_to_command(command, dirs.iter().map(PathBuf::as_path));
+}
+
+fn prepend_path_to_command(command: &mut Command, dir: &Path) {
+    let mut paths = vec![dir.to_path_buf()];
+    paths.extend(
+        command_env_path(command)
+            .or_else(|| env::var_os("PATH"))
+            .map(|path| env::split_paths(&path).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    command.env(
+        "PATH",
+        env::join_paths(paths).expect("PATH entries are valid"),
+    );
 }
 
 fn apply_windows_posix_shell(command: &mut Command, target: NativeTarget) {
@@ -4270,6 +4302,25 @@ mod tests {
         assert_eq!(paths[0], vs_bin);
         assert_eq!(paths[1], system_bin);
         assert!(paths.iter().any(|path| path == &msys_bin));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepending_path_places_posix_tools_before_existing_entries() {
+        let temp = env::temp_dir().join("erika-xtask-posix-path-order-test");
+        let msys_bin = temp.join("msys64/usr/bin");
+        let mingw_bin = temp.join("mingw64/bin");
+        fs::create_dir_all(&msys_bin).unwrap();
+        fs::create_dir_all(&mingw_bin).unwrap();
+
+        let mut command = Command::new("tool");
+        command.env("PATH", env::join_paths([&mingw_bin]).unwrap());
+        prepend_path_to_command(&mut command, &msys_bin);
+
+        let merged = command_env_path(&command).unwrap();
+        let paths = env::split_paths(&merged).collect::<Vec<_>>();
+        assert_eq!(paths[0], msys_bin);
+        assert_eq!(paths[1], mingw_bin);
     }
 }
 
