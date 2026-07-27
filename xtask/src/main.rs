@@ -24,9 +24,11 @@ const DEFAULT_ANDROID_API_LEVEL: u32 = 26;
 const FFMPEG_ARCHIVE: &str = "ffmpeg-8.1.2.tar.xz";
 const FFMPEG_DIR: &str = "ffmpeg-8.1.2";
 const FFMPEG_URLS: &[&str] = &["https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz"];
-const FFMPEG_PATCHSET_VERSION: &str = "erika-android-mediacodec-v3";
-const FFMPEG_PATCHES: &[&str] =
-    &["third_party/patches/ffmpeg-8.1.2/0001-erika-mediacodec-bounded-receive.patch"];
+const FFMPEG_PATCHSET_VERSION: &str = "erika-android-mediacodec-v4";
+const FFMPEG_PATCHES: &[&str] = &[
+    "third_party/patches/ffmpeg-8.1.2/0001-erika-mediacodec-bounded-receive.patch",
+    "third_party/patches/ffmpeg-8.1.2/0002-windows-msvc-awk-backslash.patch",
+];
 
 const DAV1D_ARCHIVE: &str = "dav1d-1.5.1.tar.gz";
 const DAV1D_DIR: &str = "dav1d-1.5.1";
@@ -784,6 +786,12 @@ fn ensure_required_tools(options: DepsOptions, layout: &WorkspaceLayout) -> Resu
         if gnu_make().is_none() {
             bail!("required GNU make was not found; install MSYS2 make or MinGW mingw32-make");
         }
+        if ffmpeg_requires_nasm(options.target)
+            && !ffmpeg_build_marker_is_current(layout, options)
+            && which("nasm").is_none()
+        {
+            bail!("required build tool `nasm` was not found for Windows x86_64 FFmpeg assembly");
+        }
         if cmake_tool().is_none() {
             bail!("required CMake was not found; install the Visual Studio CMake component");
         }
@@ -1013,6 +1021,16 @@ fn dav1d_requires_nasm(target: NativeTarget) -> bool {
         target,
         NativeTarget::X86_64Macos | NativeTarget::X86_64IosSimulator | NativeTarget::X86_64Android
     )
+}
+
+fn ffmpeg_requires_nasm(target: NativeTarget) -> bool {
+    matches!(
+        target,
+        NativeTarget::X86_64Macos
+            | NativeTarget::X86_64IosSimulator
+            | NativeTarget::X86_64WindowsMsvc
+            | NativeTarget::X86_64Android
+    ) || (matches!(target, NativeTarget::Host) && cfg!(target_arch = "x86_64"))
 }
 
 fn build_freetype(layout: &WorkspaceLayout, options: DepsOptions) -> Result<()> {
@@ -2170,9 +2188,6 @@ fn build_ffmpeg(layout: &WorkspaceLayout, options: DepsOptions) -> Result<()> {
     } else {
         configure.arg("--pkg-config=false");
     }
-    if !options.target.is_android() {
-        configure.arg("--disable-x86asm");
-    }
     let mut extra_cflags = if options.target.is_windows() {
         Vec::new()
     } else {
@@ -2716,9 +2731,8 @@ fn ffmpeg_build_marker_is_current(layout: &WorkspaceLayout, options: DepsOptions
     } else {
         marker.contains("android_api=n/a\n")
     };
-    let patchset_is_current = ffmpeg_patchset_id(&layout.root).is_ok_and(|patchset| {
-        ffmpeg_build_marker_has_current_patchset(&marker, options.target, &patchset)
-    });
+    let patchset_is_current = ffmpeg_patchset_id(&layout.root)
+        .is_ok_and(|patchset| ffmpeg_build_marker_has_current_patchset(&marker, &patchset));
     marker.contains(&format!("ffmpeg={FFMPEG_VERSION}\n"))
         && marker.contains(&format!("profile={}\n", profile_name(options.profile)))
         && marker.contains(&format!(
@@ -2773,16 +2787,11 @@ fn ffmpeg_build_marker_has_current_flags(
         .is_some_and(|flags| flags == expected)
 }
 
-fn ffmpeg_build_marker_has_current_patchset(
-    marker: &str,
-    target: NativeTarget,
-    expected: &str,
-) -> bool {
-    !target.is_android()
-        || marker
-            .lines()
-            .find_map(|line| line.strip_prefix("patchset="))
-            .is_some_and(|patchset| patchset == expected)
+fn ffmpeg_build_marker_has_current_patchset(marker: &str, expected: &str) -> bool {
+    marker
+        .lines()
+        .find_map(|line| line.strip_prefix("patchset="))
+        .is_some_and(|patchset| patchset == expected)
 }
 
 fn shell_escape(value: &str) -> String {
@@ -2940,7 +2949,7 @@ fn smoke_ffmpeg_make(options: DepsOptions) -> Result<()> {
     fs::write(
         smoke_dir.join("Makefile"),
         format!(
-            "all:\n\t@echo cwd=$(CURDIR)\n\t@test -f Makefile\n\t@command -v cl.exe >/dev/null\n\t@awk 'BEGIN {{ s = \"C:\\\\tmp\\\\file\"; gsub(/\\\\/, \"/\", s); if (s != \"C:/tmp/file\") exit 42 }}'\n\t@cl.exe /nologo /TP /std:c++17 /I\"{}\" /c header_smoke.cpp\n\t@echo erika-ffmpeg-make-smoke-ok\n",
+            "all:\n\t@echo cwd=$(CURDIR)\n\t@test -f Makefile\n\t@command -v cl.exe >/dev/null\n\t@awk 'BEGIN {{ bs = sprintf(\"%c\", 92); s = \"C:\" bs \"tmp\" bs \"file\"; gsub(bs bs, \"/\", s); if (s != \"C:/tmp/file\") exit 42 }}'\n\t@cl.exe /nologo /TP /std:c++17 /I\"{}\" /c header_smoke.cpp\n\t@echo erika-ffmpeg-make-smoke-ok\n",
             path_to_forward_slashes(&root)
         ),
     )
@@ -3912,6 +3921,7 @@ fn apply_windows_posix_shell(command: &mut Command, target: NativeTarget) {
     };
     command.env("CONFIG_SHELL", &shell);
     command.env("SHELL", &shell);
+    command.env("MAKESHELL", &shell);
 }
 
 fn uses_windows_posix_ffmpeg(target: NativeTarget) -> bool {
@@ -4120,6 +4130,22 @@ mod tests {
     }
 
     #[test]
+    fn x86_64_targets_keep_ffmpeg_assembly_enabled() {
+        for target in [
+            NativeTarget::X86_64Macos,
+            NativeTarget::X86_64IosSimulator,
+            NativeTarget::X86_64WindowsMsvc,
+            NativeTarget::X86_64Android,
+        ] {
+            let flags = NativeDependencyProfile::Lgpl.ffmpeg_configure_flags_for_target(target);
+            assert!(!flags.contains(&"--disable-x86asm"));
+            assert!(!flags.contains(&"--disable-asm"));
+            assert!(ffmpeg_requires_nasm(target));
+        }
+        assert!(!ffmpeg_requires_nasm(NativeTarget::Aarch64WindowsMsvc));
+    }
+
+    #[test]
     fn android_targets_map_to_rust_abi_and_clang() {
         let cases = [
             (
@@ -4233,22 +4259,18 @@ mod tests {
     }
 
     #[test]
-    fn android_ffmpeg_marker_requires_current_patchset_revision() {
-        let target = NativeTarget::X86_64Android;
+    fn ffmpeg_markers_require_current_patchset_revision() {
         let patchset = "erika-android-mediacodec-v1-deadbeef";
         assert!(!ffmpeg_build_marker_has_current_patchset(
             &format!("ffmpeg={FFMPEG_VERSION}\n"),
-            target,
+            patchset
+        ));
+        assert!(!ffmpeg_build_marker_has_current_patchset(
+            &format!("ffmpeg={FFMPEG_VERSION}\npatchset=stale\n"),
             patchset
         ));
         assert!(ffmpeg_build_marker_has_current_patchset(
             &format!("ffmpeg={FFMPEG_VERSION}\npatchset={patchset}\n"),
-            target,
-            patchset
-        ));
-        assert!(ffmpeg_build_marker_has_current_patchset(
-            &format!("ffmpeg={FFMPEG_VERSION}\n"),
-            NativeTarget::Host,
             patchset
         ));
     }
