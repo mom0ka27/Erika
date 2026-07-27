@@ -11,6 +11,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 const FFMPEG_VERSION: &str = "8.1.2";
+const GAS_PREPROCESSOR_REVISION: &str = "d09971fad329d32df19f5bbafe88cf2f0ed04ed7";
+const GAS_PREPROCESSOR_URL: &str = "https://raw.githubusercontent.com/libav/gas-preprocessor/d09971fad329d32df19f5bbafe88cf2f0ed04ed7/gas-preprocessor.pl";
 const DAV1D_VERSION: &str = "1.5.1";
 const LIBASS_VERSION: &str = "0.17.5";
 const HARFBUZZ_VERSION: &str = "14.2.1";
@@ -2279,6 +2281,10 @@ fn build_ffmpeg(layout: &WorkspaceLayout, options: DepsOptions) -> Result<()> {
         ));
         if matches!(options.target, NativeTarget::Aarch64WindowsMsvc) {
             configure.arg("--enable-cross-compile");
+            let gas_preprocessor = ensure_gas_preprocessor(layout)?;
+            if let Some(parent) = gas_preprocessor.parent() {
+                prepend_path_to_command(&mut configure, parent);
+            }
         }
         configure.arg("--toolchain=msvc");
         extra_cflags.push(format!(
@@ -2387,6 +2393,43 @@ fn build_ffmpeg(layout: &WorkspaceLayout, options: DepsOptions) -> Result<()> {
     )
     .with_context(|| format!("write {}", layout.ffmpeg_build_marker.display()))?;
     Ok(())
+}
+
+fn ensure_gas_preprocessor(layout: &WorkspaceLayout) -> Result<PathBuf> {
+    let tools_dir = layout.cache_dir.join("tools");
+    let destination = tools_dir.join("gas-preprocessor.pl");
+    let marker = tools_dir.join("gas-preprocessor.revision");
+    let current = fs::read_to_string(&marker)
+        .ok()
+        .is_some_and(|value| value.trim() == GAS_PREPROCESSOR_REVISION);
+    if destination.is_file() && current {
+        ensure_gas_preprocessor_executable(&destination)?;
+        return Ok(destination);
+    }
+    fs::create_dir_all(&tools_dir).with_context(|| format!("create {}", tools_dir.display()))?;
+    let partial = tools_dir.join("gas-preprocessor.pl.part");
+    if partial.exists() {
+        fs::remove_file(&partial).with_context(|| format!("remove {}", partial.display()))?;
+    }
+    println!("download {GAS_PREPROCESSOR_URL}");
+    download_url(&download_agent(), GAS_PREPROCESSOR_URL, &partial)?;
+    fs::rename(&partial, &destination)
+        .with_context(|| format!("rename {} to {}", partial.display(), destination.display()))?;
+    fs::write(&marker, format!("{GAS_PREPROCESSOR_REVISION}\n"))
+        .with_context(|| format!("write {}", marker.display()))?;
+    ensure_gas_preprocessor_executable(&destination)?;
+    Ok(destination)
+}
+
+fn ensure_gas_preprocessor_executable(path: &Path) -> Result<()> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let shell = posix_shell().context("required POSIX shell was not found")?;
+    run(Command::new(shell).arg("-lc").arg(format!(
+        "chmod +x {}",
+        shell_quote(&path_to_forward_slashes(path))
+    )))
 }
 
 fn enable_ffmpeg_archive_response_files(build_dir: &Path) -> Result<()> {
