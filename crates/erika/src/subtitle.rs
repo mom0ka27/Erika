@@ -9,7 +9,10 @@ use std::{sync::Arc, time::Duration};
 
 use thiserror::Error;
 
-#[cfg(all(feature = "libass", any(target_os = "ios", target_os = "android")))]
+#[cfg(all(
+    feature = "libass",
+    any(target_os = "ios", target_os = "android", target_os = "macos")
+))]
 use crate::NIPAPLAY_FALLBACK_FONT;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -690,8 +693,6 @@ mod libass_ffi {
 const ASS_FONTPROVIDER_NONE: libc::c_int = 0;
 #[cfg(feature = "libass")]
 const ASS_FONTPROVIDER_AUTODETECT: libc::c_int = 1;
-#[cfg(feature = "libass")]
-const ASS_FONTPROVIDER_CORETEXT: libc::c_int = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LibassRenderConfig {
@@ -1637,19 +1638,19 @@ fn escape_ass_text(value: &str) -> String {
 
 const DEFAULT_ASS_FONT_SIZE: f64 = 48.0;
 const DEFAULT_ASS_OUTLINE: f64 = 2.0;
-#[cfg(any(target_os = "ios", target_os = "android"))]
+#[cfg(any(target_os = "ios", target_os = "android", target_os = "macos"))]
 const DEFAULT_ASS_FONT_FAMILY: &str = "Droid Sans Fallback";
-#[cfg(target_os = "macos")]
-const DEFAULT_ASS_FONT_FAMILY: &str = "PingFang SC";
 #[cfg(not(any(target_os = "ios", target_os = "android", target_os = "macos")))]
 const DEFAULT_ASS_FONT_FAMILY: &str = "Arial";
 
 #[cfg(feature = "libass")]
 fn default_ass_font_provider() -> libc::c_int {
-    if cfg!(any(target_os = "ios", target_os = "android")) {
+    if cfg!(any(
+        target_os = "ios",
+        target_os = "android",
+        target_os = "macos"
+    )) {
         ASS_FONTPROVIDER_NONE
-    } else if cfg!(target_os = "macos") {
-        ASS_FONTPROVIDER_CORETEXT
     } else {
         ASS_FONTPROVIDER_AUTODETECT
     }
@@ -1657,10 +1658,12 @@ fn default_ass_font_provider() -> libc::c_int {
 
 #[cfg(feature = "libass")]
 fn default_ass_font_family_cstr() -> &'static CStr {
-    if cfg!(any(target_os = "ios", target_os = "android")) {
+    if cfg!(any(
+        target_os = "ios",
+        target_os = "android",
+        target_os = "macos"
+    )) {
         c"Droid Sans Fallback"
-    } else if cfg!(target_os = "macos") {
-        c"PingFang SC"
     } else {
         c"Arial"
     }
@@ -1771,7 +1774,10 @@ unsafe fn add_attached_ass_fonts(
     }
 }
 
-#[cfg(all(feature = "libass", any(target_os = "ios", target_os = "android")))]
+#[cfg(all(
+    feature = "libass",
+    any(target_os = "ios", target_os = "android", target_os = "macos")
+))]
 unsafe fn add_bundled_ass_fallback_font(library: *mut libass_ffi::AssLibrary) {
     debug_assert!(NIPAPLAY_FALLBACK_FONT.len() <= libc::c_int::MAX as usize);
     unsafe {
@@ -1784,7 +1790,10 @@ unsafe fn add_bundled_ass_fallback_font(library: *mut libass_ffi::AssLibrary) {
     }
 }
 
-#[cfg(all(feature = "libass", not(any(target_os = "ios", target_os = "android"))))]
+#[cfg(all(
+    feature = "libass",
+    not(any(target_os = "ios", target_os = "android", target_os = "macos"))
+))]
 unsafe fn add_bundled_ass_fallback_font(_library: *mut libass_ffi::AssLibrary) {}
 
 fn normalize_ass_font_scale(scale: f64) -> f64 {
@@ -2355,6 +2364,58 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         assert_eq!(bitmaps.color_space, SubtitleBitmapColorSpace::Video);
         assert!(!bitmaps.parts.is_empty());
         assert!(bitmaps.parts.iter().all(SubtitleAlphaBitmap::is_valid));
+    }
+
+    #[cfg(feature = "libass")]
+    #[test]
+    fn libass_font_policy_avoids_system_provider_on_apple_platforms() {
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
+        {
+            assert_eq!(DEFAULT_ASS_FONT_FAMILY, "Droid Sans Fallback");
+            assert_eq!(default_ass_font_provider(), ASS_FONTPROVIDER_NONE);
+            assert_eq!(
+                default_ass_font_family_cstr().to_str().unwrap(),
+                "Droid Sans Fallback"
+            );
+        }
+    }
+
+    #[cfg(feature = "libass")]
+    #[test]
+    fn libass_falls_back_to_bundled_font_for_unavailable_family() {
+        const SCRIPT: &str = r#"[Script Info]
+ScriptType: v4.00+
+PlayResX: 640
+PlayResY: 360
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Erika No Such Font 9c1f,32,&H00FFFFFF,&H000000FF,&H80000000,&H80000000,0,0,0,0,100,100,0,0,1,2,0,2,20,20,24,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:02.00,Default,,0,0,0,,中文字幕 fallback
+"#;
+
+        let mut renderer =
+            LibassSubtitleRenderer::from_ass_script(SCRIPT, LibassRenderConfig::default()).unwrap();
+        let SubtitleRenderOutput::Alpha(bitmaps) = renderer
+            .render(SubtitleRenderRequest::new(
+                Duration::from_millis(500),
+                640,
+                360,
+            ))
+            .unwrap()
+        else {
+            panic!("libass renderer should produce alpha bitmap output");
+        };
+
+        assert!(!bitmaps.parts.is_empty());
+        let seen = renderer.runtime._log_context.seen.lock().unwrap();
+        assert!(seen.iter().any(|message| {
+            let message = message.to_ascii_lowercase();
+            message.contains("using default font family") && message.contains("droidsansfallback")
+        }));
     }
 
     #[cfg(feature = "libass")]
