@@ -208,6 +208,12 @@ jobs:
         with:
           path: third_party
           key: deps-windows-${{ matrix.arch }}-${{ hashFiles('xtask/src/main.rs') }}
+      - name: Verify FFmpeg make shell
+        shell: pwsh
+        run: |
+          cargo run --locked -p xtask -- deps smoke-ffmpeg-make `
+            --profile "$env:PROFILE" `
+            --target "${{ matrix.target }}"
       - name: Build native dependencies
         shell: bash
         run: >-
