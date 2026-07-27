@@ -19,6 +19,21 @@
 - External subtitle and danmaku sidecar loads still use the headerless path;
   they do not yet inherit the request's headers.
 
+### Subtitle font fallback and style
+
+- libass now registers Erika's bundled Droid Sans Fallback on every platform,
+  not just iOS/Android, and targets without a system font provider (the
+  vendored libass build disables fontconfig) default to that family instead of
+  an unresolvable `Arial`.
+- Added a subtitle style: a custom font family, font file, font size, outline
+  width, and text/outline colours (`0xRRGGBBAA`). They act as fallbacks — an ASS
+  script keeps its own styling — and `force_override` promotes them to libass'
+  selective style override so they replace what dialogue events request. The
+  existing subtitle scale still multiplies the size and outline width.
+- New C API: `erika_presenter_set_subtitle_font`,
+  `erika_presenter_set_subtitle_style`. New Dart API:
+  `ErikaPlayer.setSubtitleStyle`.
+
 ## 0.1.3 - 2026-07-17
 
 ### Android playback and packaging
