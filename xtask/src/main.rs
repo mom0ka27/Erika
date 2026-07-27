@@ -2731,9 +2731,8 @@ fn ffmpeg_build_marker_is_current(layout: &WorkspaceLayout, options: DepsOptions
     } else {
         marker.contains("android_api=n/a\n")
     };
-    let patchset_is_current = ffmpeg_patchset_id(&layout.root).is_ok_and(|patchset| {
-        ffmpeg_build_marker_has_current_patchset(&marker, options.target, &patchset)
-    });
+    let patchset_is_current = ffmpeg_patchset_id(&layout.root)
+        .is_ok_and(|patchset| ffmpeg_build_marker_has_current_patchset(&marker, &patchset));
     marker.contains(&format!("ffmpeg={FFMPEG_VERSION}\n"))
         && marker.contains(&format!("profile={}\n", profile_name(options.profile)))
         && marker.contains(&format!(
@@ -2788,16 +2787,11 @@ fn ffmpeg_build_marker_has_current_flags(
         .is_some_and(|flags| flags == expected)
 }
 
-fn ffmpeg_build_marker_has_current_patchset(
-    marker: &str,
-    target: NativeTarget,
-    expected: &str,
-) -> bool {
-    !target.is_android()
-        || marker
-            .lines()
-            .find_map(|line| line.strip_prefix("patchset="))
-            .is_some_and(|patchset| patchset == expected)
+fn ffmpeg_build_marker_has_current_patchset(marker: &str, expected: &str) -> bool {
+    marker
+        .lines()
+        .find_map(|line| line.strip_prefix("patchset="))
+        .is_some_and(|patchset| patchset == expected)
 }
 
 fn shell_escape(value: &str) -> String {
@@ -4265,22 +4259,18 @@ mod tests {
     }
 
     #[test]
-    fn android_ffmpeg_marker_requires_current_patchset_revision() {
-        let target = NativeTarget::X86_64Android;
+    fn ffmpeg_markers_require_current_patchset_revision() {
         let patchset = "erika-android-mediacodec-v1-deadbeef";
         assert!(!ffmpeg_build_marker_has_current_patchset(
             &format!("ffmpeg={FFMPEG_VERSION}\n"),
-            target,
+            patchset
+        ));
+        assert!(!ffmpeg_build_marker_has_current_patchset(
+            &format!("ffmpeg={FFMPEG_VERSION}\npatchset=stale\n"),
             patchset
         ));
         assert!(ffmpeg_build_marker_has_current_patchset(
             &format!("ffmpeg={FFMPEG_VERSION}\npatchset={patchset}\n"),
-            target,
-            patchset
-        ));
-        assert!(ffmpeg_build_marker_has_current_patchset(
-            &format!("ffmpeg={FFMPEG_VERSION}\n"),
-            NativeTarget::Host,
             patchset
         ));
     }
