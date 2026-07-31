@@ -909,6 +909,10 @@ enum PlaybackCommand {
         quiesced: bool,
         reply: Sender<()>,
     },
+    SetVideoDecodeSuspended {
+        suspended: bool,
+        reply: Sender<std::result::Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -1252,15 +1256,7 @@ impl Player {
         };
         commands
             .send(PlaybackCommand::Pause { sequence })
-            .map_err(|_| PlayerError::Playback("playback worker is not running".to_string()))?;
-        let _ = commit_playback_command_intent(
-            &self.inner,
-            sequence,
-            None,
-            None,
-            Some(PlayerState::Paused),
-        );
-        Ok(())
+            .map_err(|_| PlayerError::Playback("playback worker is not running".to_string()))
     }
 
     pub fn seek(&self, position: Duration) -> Result<()> {
@@ -1437,6 +1433,25 @@ impl Player {
 
     pub(crate) fn set_frame_output_quiesced(&self, quiesced: bool) -> Result<bool> {
         self.set_frame_output_quiesced_with_timeout(quiesced, FRAME_OUTPUT_BARRIER_TIMEOUT)
+    }
+
+    pub(crate) fn set_video_decode_suspended(&self, suspended: bool) -> Result<bool> {
+        let Some(commands) = self.optional_playback_commands() else {
+            return Ok(false);
+        };
+        let (reply, response) = bounded(1);
+        commands
+            .send(PlaybackCommand::SetVideoDecodeSuspended { suspended, reply })
+            .map_err(|_| PlayerError::Playback("playback worker is not running".to_string()))?;
+        response
+            .recv()
+            .map_err(|_| {
+                PlayerError::Playback(
+                    "playback worker stopped before acknowledging video decode mode".to_string(),
+                )
+            })?
+            .map_err(PlayerError::Playback)?;
+        Ok(true)
     }
 
     fn set_frame_output_quiesced_with_timeout(
@@ -2278,11 +2293,12 @@ fn handle_playback_command(
                 return true;
             }
             engine.pause();
+            let position = engine.media_time();
             let _ = commit_playback_command_intent(
                 inner,
                 sequence,
                 None,
-                None,
+                Some(position),
                 Some(PlayerState::Paused),
             );
         }
@@ -2539,6 +2555,20 @@ fn handle_playback_command(
                 .to_string(),
             );
             let _ = reply.send(());
+        }
+        PlaybackCommand::SetVideoDecodeSuspended { suspended, reply } => {
+            let result = engine
+                .set_video_decode_suspended(suspended)
+                .map_err(|error| error.to_string());
+            trace::diagnostic(
+                serde_json::json!({
+                    "event": "player_video_decode",
+                    "stage": if suspended { "suspended" } else { "resumed_at_keyframe" },
+                    "generation": *playback_generation,
+                })
+                .to_string(),
+            );
+            let _ = reply.send(result);
         }
         PlaybackCommand::Shutdown => return false,
     }
@@ -3218,6 +3248,28 @@ mod tests {
     }
 
     #[test]
+    fn video_decode_mode_is_a_noop_without_open_media() {
+        let player = Player::new(PlayerConfig::default());
+        assert!(!player.set_video_decode_suspended(true).unwrap());
+    }
+
+    #[test]
+    fn video_decode_mode_uses_an_acknowledged_worker_command() {
+        let player = Player::new(PlayerConfig::default());
+        let receiver = install_test_runtime(&player, 1);
+        let worker = thread::spawn(move || match receiver.recv().unwrap() {
+            PlaybackCommand::SetVideoDecodeSuspended {
+                suspended: true,
+                reply,
+            } => reply.send(Ok(())).unwrap(),
+            _ => panic!("unexpected playback command"),
+        });
+
+        assert!(player.set_video_decode_suspended(true).unwrap());
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn frame_output_barrier_reports_an_unresponsive_worker() {
         let player = Player::new(PlayerConfig::default());
         let receiver = install_test_runtime(&player, 2);
@@ -3494,8 +3546,9 @@ mod tests {
     }
 
     #[test]
-    fn pause_publishes_a_parked_clock_with_the_paused_state() {
+    fn pause_waits_for_worker_position_before_paused_state() {
         let player = Player::new(PlayerConfig::default());
+        let events = player.subscribe();
         let commands = install_test_runtime(&player, 1);
         let anchor = Instant::now();
         {
@@ -3506,10 +3559,31 @@ mod tests {
 
         player.pause().unwrap();
 
-        assert!(matches!(
-            commands.recv_timeout(Duration::from_secs(1)).unwrap(),
-            PlaybackCommand::Pause { .. }
+        let sequence = match commands.recv_timeout(Duration::from_secs(1)).unwrap() {
+            PlaybackCommand::Pause { sequence } => sequence,
+            _ => panic!("expected pause command"),
+        };
+        assert_eq!(player.state(), PlayerState::Playing);
+        assert!(events.try_recv().is_err());
+
+        let position = Duration::from_millis(9_250);
+        assert!(commit_playback_command_intent(
+            &player.inner,
+            sequence,
+            None,
+            Some(position),
+            Some(PlayerState::Paused),
         ));
+        assert_eq!(
+            events.recv().unwrap(),
+            PlayerEvent::PositionChanged(position)
+        );
+        assert_eq!(
+            events.recv().unwrap(),
+            PlayerEvent::StateChanged(PlayerState::Paused)
+        );
+        assert_eq!(player.current_media_time(), position);
+        assert_eq!(player.state(), PlayerState::Paused);
         let snapshot = player.playback_snapshot();
         assert_eq!(snapshot.state, PlayerState::Paused);
         assert!(!snapshot.clock.is_running());
